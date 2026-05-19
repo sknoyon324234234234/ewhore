@@ -2,7 +2,6 @@ import "dotenv/config";
 import express from "express";
 import path from "path";
 import crypto from "crypto";
-import { createServer as createViteServer } from "vite";
 import http from "http";
 import { Server } from "socket.io";
 import cors from "cors";
@@ -425,26 +424,21 @@ async function startServer() {
     res.json({ success: true });
   });
 
-  // Vite middleware for development
-  if (process.env.NODE_ENV !== "production") {
+  // Determine if we are in production based on env var OR if the built index.html exists
+  const distPath = path.join(process.cwd(), "dist");
+  const isProd = process.env.NODE_ENV === "production" || fs.existsSync(path.join(distPath, "index.html"));
+
+  if (!isProd) {
+    // Vite middleware for development
+    const { createServer: createViteServer } = await import("vite");
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",
     });
     app.use(vite.middlewares);
   } else {
-    const distPath = path.join(process.cwd(), "dist");
-    
-    // Serve static files with correct MIME types
-    app.use(express.static(distPath, {
-      setHeaders: (res, filePath) => {
-        if (filePath.endsWith('.js')) {
-          res.setHeader('Content-Type', 'application/javascript');
-        } else if (filePath.endsWith('.css')) {
-          res.setHeader('Content-Type', 'text/css');
-        }
-      }
-    }));
+    // Serve static files in production
+    app.use(express.static(distPath));
     
     app.get("*", (req, res) => {
       res.sendFile(path.join(distPath, "index.html"));
