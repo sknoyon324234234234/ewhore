@@ -1,0 +1,8 @@
+User-agent: *
+Allow: /
+Disallow: /admin
+Disallow: /profile
+Disallow: /cart
+Disallow: /checkout
+
+Sitemap: https://ewhore.shop/sitemap.xml
