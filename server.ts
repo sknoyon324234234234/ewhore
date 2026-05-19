@@ -424,12 +424,11 @@ async function startServer() {
     res.json({ success: true });
   });
 
-  // Determine if we are in production based on env var OR if the built index.html exists
-  const distPath = path.join(process.cwd(), "dist");
-  const isProd = process.env.NODE_ENV === "production" || fs.existsSync(path.join(distPath, "index.html"));
+  // Determine if we are in production based on env var OR Hostinger dynamic port
+  const isProd = process.env.NODE_ENV === "production" || !!process.env.PORT;
 
   if (!isProd) {
-    // Vite middleware for development
+    // Vite middleware for local development
     const { createServer: createViteServer } = await import("vite");
     const vite = await createViteServer({
       server: { middlewareMode: true },
@@ -438,6 +437,19 @@ async function startServer() {
     app.use(vite.middlewares);
   } else {
     // Serve static files in production
+    // Check possible locations for the built files (Hostinger sometimes runs from dist directly)
+    let distPath = path.join(process.cwd(), "dist");
+    
+    if (!fs.existsSync(path.join(distPath, "index.html")) && fs.existsSync(path.join(process.cwd(), "index.html"))) {
+        // If dist/index.html doesn't exist but ./index.html does, Hostinger might be running from inside dist
+        // OR it moved the files to root.
+        const indexContent = fs.readFileSync(path.join(process.cwd(), "index.html"), "utf-8");
+        // Ensure it's the built index.html (which doesn't contain src/main.tsx)
+        if (!indexContent.includes("src/main.tsx")) {
+            distPath = process.cwd();
+        }
+    }
+
     app.use(express.static(distPath));
     
     app.get("*", (req, res) => {
