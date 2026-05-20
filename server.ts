@@ -15,8 +15,74 @@ import { getDb, User } from "./src/db.ts";
 
 import fs from "fs";
 import AdmZip from "adm-zip";
+import nodemailer from "nodemailer";
 
 const JWT_SECRET = process.env.JWT_SECRET || "super-secret-key-change-me";
+
+// Email Configuration
+const transporter = nodemailer.createTransport({
+    host: process.env.SMTP_HOST || 'smtp.hostinger.com',
+    port: 465,
+    secure: true,
+    auth: {
+        user: process.env.SMTP_USER || 'support@ewhore.shop',
+        pass: process.env.SMTP_PASS || '8w%MSe2mC7hEw%5'
+    }
+});
+
+const sendOrderEmail = async (userEmail: string, userName: string, orderDetails: any, productDetails: any) => {
+    try {
+        let APP_URL = process.env.APP_URL || "https://ewhore.shop";
+        if (APP_URL === "MY_APP_URL" || APP_URL === "http://localhost:3000") {
+            APP_URL = "https://ewhore.shop";
+        }
+
+        const mainImage = productDetails.images && productDetails.images.length > 0 
+            ? (productDetails.images[0].startsWith('http') ? productDetails.images[0] : `${APP_URL}${productDetails.images[0]}`) 
+            : `${APP_URL}/web-app-manifest-192x192.png`;
+
+        const htmlTemplate = `
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; background-color: #000; color: #fff; padding: 30px; border-radius: 20px;">
+            <div style="text-align: center; margin-bottom: 30px;">
+                <h1 style="color: #fff; margin: 0; font-size: 28px; font-weight: 900;">EWHORE SHOP</h1>
+                <p style="color: #888; font-size: 14px;">Your Premium Content Delivered</p>
+            </div>
+            
+            <div style="background-color: #111; border: 1px solid #333; border-radius: 15px; padding: 25px; margin-bottom: 20px;">
+                <h2 style="margin-top: 0; font-size: 20px; border-bottom: 1px solid #333; padding-bottom: 15px;">Order Receipt</h2>
+                <p style="color: #ccc;">Hi <strong>${userName}</strong>,</p>
+                <p style="color: #ccc;">Thank you for your purchase! Your crypto payment has been successfully confirmed.</p>
+                
+                <div style="margin: 25px 0; text-align: center;">
+                    <img src="${mainImage}" alt="${productDetails.name}" style="max-width: 200px; border-radius: 10px; border: 1px solid #333;" />
+                    <h3 style="margin: 15px 0 5px 0;">${productDetails.name}</h3>
+                    <p style="color: #4ade80; font-size: 18px; font-weight: bold; margin: 0;">$${orderDetails.price.toFixed(2)}</p>
+                </div>
+
+                <div style="background-color: #000; padding: 15px; border-radius: 10px; border: 1px solid #333; margin-top: 20px;">
+                    <p style="margin: 0 0 10px 0; color: #888; font-size: 12px; text-transform: uppercase; letter-spacing: 1px;">Your Access Link</p>
+                    <a href="${productDetails.accessLink}" style="display: block; background-color: #fff; color: #000; text-align: center; padding: 12px; border-radius: 8px; text-decoration: none; font-weight: bold; font-size: 16px;">Access Content Now</a>
+                </div>
+            </div>
+            
+            <div style="text-align: center; color: #666; font-size: 12px; margin-top: 30px;">
+                <p>If you have any issues, please reply to this email or contact support.</p>
+                <p>&copy; ${new Date().getFullYear()} Ewhore Shop. All rights reserved.</p>
+            </div>
+        </div>
+        `;
+
+        await transporter.sendMail({
+            from: '"Ewhore Shop" <support@ewhore.shop>',
+            to: userEmail,
+            subject: `Receipt: Your order for ${productDetails.name} is complete!`,
+            html: htmlTemplate
+        });
+        console.log(`Order email successfully sent to ${userEmail}`);
+    } catch (error) {
+        console.error('Failed to send order email:', error);
+    }
+};
 
 // Helper function to save base64 images
 const saveBase64Images = (images: string[]) => {
@@ -535,6 +601,8 @@ async function startServer() {
 
             // Instantly grant product on success or acceptable partial payment
             if (isApproved) {
+                let emailsToSend: { email: string, name: string, order: any, product: any }[] = [];
+
                 await currentDb.update(dbData => {
                     const ordersToComplete = dbData.orders.filter(o => o.invoiceId === invoiceId && o.status === 'pending');
                     for (const order of ordersToComplete) {
@@ -548,12 +616,21 @@ async function startServer() {
                         const user = dbData.users.find(u => u.id === order.userId);
                         if (user) {
                             user.loyaltyPoints += Math.floor(order.price);
+                            if (product) {
+                                emailsToSend.push({ email: user.email, name: user.name, order, product });
+                            }
                         }
                         io.emit("new_order", { orderId: order.id, productId: order.productId, name: product?.name });
                         io.emit("inventory_update", { productId: order.productId, inventoryCount: product?.inventoryCount });
                     }
                 });
                 await currentDb.write();
+
+                // Send emails in background
+                for (const emailData of emailsToSend) {
+                    sendOrderEmail(emailData.email, emailData.name, emailData.order, emailData.product);
+                }
+
             } else if (isFailed) {
                 await currentDb.update(dbData => {
                     const ordersToFail = dbData.orders.filter(o => o.invoiceId === invoiceId && o.status === 'pending');
