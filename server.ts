@@ -65,7 +65,8 @@ async function startServer() {
 
   app.use(helmet({
     contentSecurityPolicy: false, // Disabled for local dev / Vite compatibility
-    crossOriginEmbedderPolicy: false
+    crossOriginEmbedderPolicy: false,
+    crossOriginOpenerPolicy: false // CRITICAL: Allows Google Login popup to communicate with the main window
   }));
   
   // Rate limiting to prevent abuse
@@ -178,6 +179,8 @@ async function startServer() {
 
   app.post("/api/auth/google", async (req, res) => {
     const { email, name, googleId, referralCode } = req.body;
+    console.log("Google Login Attempt for:", email);
+    
     let user = db.data.users.find(u => u.email === email);
 
     if (!user) {
