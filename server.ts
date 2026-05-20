@@ -433,6 +433,7 @@ async function startServer() {
                 price_currency: "usd",
                 order_id: batchId,
                 order_description: `Purchase of ${pendingOrders.length} items`,
+                ipn_callback_url: `${APP_URL}/api/webhooks/nowpayments`,
                 success_url: `${APP_URL}/profile#inventory`,
                 cancel_url: `${APP_URL}/cart`
             })
@@ -636,9 +637,122 @@ async function startServer() {
     });
   }
 
-  // Background polling for NowPayments invoices
+  // NowPayments IPN Webhook
+  app.post("/api/webhooks/nowpayments", async (req, res) => {
+    try {
+        const data = req.body;
+        const sig = req.headers['x-nowpayments-sig'];
+        const ipnSecret = process.env.NOWPAYMENTS_IPN_SECRET;
+
+        // Verify signature if IPN Secret is provided
+        if (ipnSecret && sig) {
+            const crypto = require('crypto');
+            // NowPayments docs: sort keys alphabetically, JSON.stringify, then HMAC sha512
+            const sortedKeys = Object.keys(data).sort();
+            const sortedData: any = {};
+            sortedKeys.forEach(k => sortedData[k] = data[k]);
+            
+            const payload = JSON.stringify(sortedData);
+            const expected = crypto.createHmac('sha512', ipnSecret).update(payload).digest('hex');
+            
+            if (String(sig).toLowerCase() !== expected.toLowerCase()) {
+                logger.error(`Webhook signature mismatch. Expected: ${expected}, Got: ${sig}`);
+                return res.status(401).json({ error: "Invalid signature" });
+            }
+        }
+
+        const status = data.payment_status || data.status;
+        const batchId = data.order_id;
+        let isApproved = false;
+        let isFailed = false;
+
+        if (!batchId) {
+            return res.status(400).json({ error: "Missing order_id" });
+        }
+
+        console.log(`Webhook received for batchId ${batchId} with status ${status}`);
+        logger.info(`Webhook received for batchId ${batchId} with status ${status}`);
+
+        const successStatuses = ['finished', 'confirmed', 'sending', 'overpaid'];
+        if (successStatuses.includes(status)) {
+            isApproved = true;
+        } else if (status === 'partially_paid') {
+            const priceAmount = Number(data.price_amount);
+            const actuallyPaidFiat = Number(data.actually_paid_fiat);
+            const actuallyPaid = Number(data.actually_paid);
+            const payAmount = Number(data.pay_amount);
+            
+            let paidUsd = 0;
+            if (!isNaN(actuallyPaidFiat) && actuallyPaidFiat > 0) {
+                paidUsd = actuallyPaidFiat;
+            } else if (!isNaN(actuallyPaid) && !isNaN(payAmount) && !isNaN(priceAmount) && payAmount > 0) {
+                paidUsd = (actuallyPaid / payAmount) * priceAmount;
+            }
+
+            if (paidUsd > 0 && paidUsd >= priceAmount - 0.50) {
+                isApproved = true;
+            }
+        } else if (status === 'expired' || status === 'failed') {
+            isFailed = true;
+        }
+
+        if (isApproved) {
+            let emailsToSend: { email: string, name: string, order: any, product: any }[] = [];
+
+            await db.update(dbData => {
+                const ordersToComplete = dbData.orders.filter(o => o.batchId === batchId && o.status === 'pending');
+                for (const order of ordersToComplete) {
+                    order.status = 'completed';
+                    const product = dbData.products.find(p => String(p.id) === String(order.productId));
+                    if (product && product.inventoryCount > 0) {
+                        product.inventoryCount -= 1;
+                    }
+                    dbData.analytics.totalOrders += 1;
+                    dbData.analytics.totalRevenue += order.price;
+                    const user = dbData.users.find(u => u.id === order.userId);
+                    if (user) {
+                        user.loyaltyPoints += Math.floor(order.price);
+                        if (product) {
+                            emailsToSend.push({ email: user.email, name: user.name, order, product });
+                        }
+                    }
+                    io.emit("new_order", { userId: order.userId, orderId: order.id, productId: order.productId, name: product?.name });
+                    io.emit("inventory_update", { productId: order.productId, inventoryCount: product?.inventoryCount });
+                    if (user) {
+                        io.emit("user_update", { userId: user.id });
+                    }
+                }
+            });
+            await db.write();
+
+            // Send emails in background
+            for (const emailData of emailsToSend) {
+                sendOrderEmail(emailData.email, emailData.name, emailData.order, emailData.product);
+            }
+        } else if (isFailed) {
+            await db.update(dbData => {
+                const ordersToFail = dbData.orders.filter(o => o.batchId === batchId && o.status === 'pending');
+                for (const order of ordersToFail) {
+                    order.status = 'failed';
+                }
+            });
+            await db.write();
+        }
+
+        res.status(200).json({ success: true });
+    } catch (err) {
+        console.error("Webhook error:", err);
+        logger.error(`Webhook error: ${err}`);
+        res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  // Background polling for NowPayments invoices (Cleanup expired only)
   setInterval(async () => {
     try {
+        console.log("Polling interval running...");
+        logger.info("Polling interval running...");
+        
         const now = new Date().getTime();
         
         // Auto-expire pending orders older than 60 minutes
@@ -658,108 +772,8 @@ async function startServer() {
             await db.write();
         }
 
-        const pendingOrders = db.data.orders.filter(o => o.status === 'pending' && o.invoiceId);
-        const uniqueInvoiceIds = [...new Set(pendingOrders.map(o => o.invoiceId))].filter(Boolean);
-
-        if (uniqueInvoiceIds.length > 0) {
-            console.log(`Checking ${uniqueInvoiceIds.length} pending NowPayments invoices...`);
-            logger.info(`Checking ${uniqueInvoiceIds.length} pending NowPayments invoices...`);
-        }
-
-        for (const invoiceId of uniqueInvoiceIds) {
-            try {
-                const res = await fetch(`https://api.nowpayments.io/v1/invoice/${invoiceId}`, {
-                    headers: { "x-api-key": process.env.NOWPAYMENTS_API_KEY || "" }
-                });
-                const data = await res.json();
-                
-                if (!res.ok) {
-                    console.error(`NowPayments check failed for invoice ${invoiceId}:`, data);
-                    logger.error(`NowPayments check failed for invoice ${invoiceId}: ${JSON.stringify(data)}`);
-                    continue;
-                }
-
-                const status = data?.payment_status || data?.status;
-                let isApproved = false;
-                let isFailed = false;
-
-                if (status) {
-                    console.log(`Invoice ${invoiceId} status: ${status}`);
-                    logger.info(`Invoice ${invoiceId} status: ${status}`);
-
-                    const successStatuses = ['finished', 'confirmed', 'sending', 'overpaid'];
-                if (successStatuses.includes(status)) {
-                    isApproved = true;
-                } else if (status === 'partially_paid') {
-                    const priceAmount = Number(data.price_amount);
-                    const actuallyPaidFiat = Number(data.actually_paid_fiat);
-                    const actuallyPaid = Number(data.actually_paid);
-                    const payAmount = Number(data.pay_amount);
-                    
-                    let paidUsd = 0;
-                    if (!isNaN(actuallyPaidFiat) && actuallyPaidFiat > 0) {
-                        paidUsd = actuallyPaidFiat;
-                    } else if (!isNaN(actuallyPaid) && !isNaN(payAmount) && !isNaN(priceAmount) && payAmount > 0) {
-                        paidUsd = (actuallyPaid / payAmount) * priceAmount;
-                    }
-
-                    // Approved if they paid within $0.50 of the price
-                    if (paidUsd > 0 && paidUsd >= priceAmount - 0.50) {
-                        isApproved = true;
-                    }
-                } else if (status === 'expired' || status === 'failed') {
-                    isFailed = true;
-                }
-            }
-
-            // Instantly grant product on success or acceptable partial payment
-            if (isApproved) {
-                let emailsToSend: { email: string, name: string, order: any, product: any }[] = [];
-
-                await db.update(dbData => {
-                    const ordersToComplete = dbData.orders.filter(o => o.invoiceId === invoiceId && o.status === 'pending');
-                    for (const order of ordersToComplete) {
-                        order.status = 'completed';
-                        const product = dbData.products.find(p => String(p.id) === String(order.productId));
-                        if (product && product.inventoryCount > 0) {
-                            product.inventoryCount -= 1;
-                        }
-                        dbData.analytics.totalOrders += 1;
-                        dbData.analytics.totalRevenue += order.price;
-                        const user = dbData.users.find(u => u.id === order.userId);
-                        if (user) {
-                            user.loyaltyPoints += Math.floor(order.price);
-                            if (product) {
-                                emailsToSend.push({ email: user.email, name: user.name, order, product });
-                            }
-                        }
-                        io.emit("new_order", { userId: order.userId, orderId: order.id, productId: order.productId, name: product?.name });
-                        io.emit("inventory_update", { productId: order.productId, inventoryCount: product?.inventoryCount });
-                        if (user) {
-                            io.emit("user_update", { userId: user.id });
-                        }
-                    }
-                });
-                await db.write();
-
-                // Send emails in background
-                for (const emailData of emailsToSend) {
-                    sendOrderEmail(emailData.email, emailData.name, emailData.order, emailData.product);
-                }
-            } else if (isFailed) {
-                await db.update(dbData => {
-                    const ordersToFail = dbData.orders.filter(o => o.invoiceId === invoiceId && o.status === 'pending');
-                    for (const order of ordersToFail) {
-                        order.status = 'failed';
-                    }
-                });
-                await db.write();
-            }
-        } catch (err) {
-            console.error(`Error polling invoice ${invoiceId}:`, err);
-            logger.error(`Error polling invoice ${invoiceId}: ${err}`);
-        }
-    }
+        // Remove NowPayments API polling as it relies on non-existent endpoints for invoices.
+        // Instead, rely on the webhook (/api/webhooks/nowpayments) for real-time status updates.
     } catch (error) {
         console.error("Polling error:", error);
         logger.error(`Polling error: ${error}`);
