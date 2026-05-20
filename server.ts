@@ -20,15 +20,6 @@ import fs from "fs";
 import AdmZip from "adm-zip";
 import nodemailer from "nodemailer";
 
-// Override global console to use our advanced logger for everything
-const originalConsoleLog = console.log;
-const originalConsoleError = console.error;
-const originalConsoleWarn = console.warn;
-
-console.log = (...args) => logger.info(args.map(a => typeof a === 'object' ? JSON.stringify(a) : a).join(' '));
-console.error = (...args) => logger.error(args.map(a => typeof a === 'object' ? JSON.stringify(a) : a).join(' '));
-console.warn = (...args) => logger.warn(args.map(a => typeof a === 'object' ? JSON.stringify(a) : a).join(' '));
-
 const JWT_SECRET = process.env.JWT_SECRET || "super-secret-key-change-me";
 
 // Email Configuration
@@ -670,18 +661,33 @@ async function startServer() {
         const pendingOrders = db.data.orders.filter(o => o.status === 'pending' && o.invoiceId);
         const uniqueInvoiceIds = [...new Set(pendingOrders.map(o => o.invoiceId))].filter(Boolean);
 
-        for (const invoiceId of uniqueInvoiceIds) {
-            const res = await fetch(`https://api.nowpayments.io/v1/invoice/${invoiceId}`, {
-                headers: { "x-api-key": process.env.NOWPAYMENTS_API_KEY || "" }
-            });
-            const data = await res.json();
-            
-            const status = data?.payment_status || data?.status;
-            let isApproved = false;
-            let isFailed = false;
+        if (uniqueInvoiceIds.length > 0) {
+            console.log(`Checking ${uniqueInvoiceIds.length} pending NowPayments invoices...`);
+            logger.info(`Checking ${uniqueInvoiceIds.length} pending NowPayments invoices...`);
+        }
 
-            if (status) {
-                const successStatuses = ['finished', 'confirmed', 'sending', 'overpaid'];
+        for (const invoiceId of uniqueInvoiceIds) {
+            try {
+                const res = await fetch(`https://api.nowpayments.io/v1/invoice/${invoiceId}`, {
+                    headers: { "x-api-key": process.env.NOWPAYMENTS_API_KEY || "" }
+                });
+                const data = await res.json();
+                
+                if (!res.ok) {
+                    console.error(`NowPayments check failed for invoice ${invoiceId}:`, data);
+                    logger.error(`NowPayments check failed for invoice ${invoiceId}: ${JSON.stringify(data)}`);
+                    continue;
+                }
+
+                const status = data?.payment_status || data?.status;
+                let isApproved = false;
+                let isFailed = false;
+
+                if (status) {
+                    console.log(`Invoice ${invoiceId} status: ${status}`);
+                    logger.info(`Invoice ${invoiceId} status: ${status}`);
+
+                    const successStatuses = ['finished', 'confirmed', 'sending', 'overpaid'];
                 if (successStatuses.includes(status)) {
                     isApproved = true;
                 } else if (status === 'partially_paid') {
@@ -740,7 +746,6 @@ async function startServer() {
                 for (const emailData of emailsToSend) {
                     sendOrderEmail(emailData.email, emailData.name, emailData.order, emailData.product);
                 }
-
             } else if (isFailed) {
                 await db.update(dbData => {
                     const ordersToFail = dbData.orders.filter(o => o.invoiceId === invoiceId && o.status === 'pending');
@@ -750,9 +755,14 @@ async function startServer() {
                 });
                 await db.write();
             }
+        } catch (err) {
+            console.error(`Error polling invoice ${invoiceId}:`, err);
+            logger.error(`Error polling invoice ${invoiceId}: ${err}`);
         }
+    }
     } catch (error) {
         console.error("Polling error:", error);
+        logger.error(`Polling error: ${error}`);
     }
   }, 60000); // Every 1 minute
 
