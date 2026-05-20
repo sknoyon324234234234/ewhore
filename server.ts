@@ -546,12 +546,11 @@ async function startServer() {
   // Background polling for NowPayments invoices
   setInterval(async () => {
     try {
-        const currentDb = await getDb();
         const now = new Date().getTime();
         
         // Auto-expire pending orders older than 60 minutes
         let expiredOrdersFound = false;
-        await currentDb.update(dbData => {
+        await db.update(dbData => {
             dbData.orders.forEach(o => {
                 if (o.status === 'pending' && o.createdAt) {
                     const orderAge = now - new Date(o.createdAt).getTime();
@@ -563,10 +562,10 @@ async function startServer() {
             });
         });
         if (expiredOrdersFound) {
-            await currentDb.write();
+            await db.write();
         }
 
-        const pendingOrders = currentDb.data.orders.filter(o => o.status === 'pending' && o.invoiceId);
+        const pendingOrders = db.data.orders.filter(o => o.status === 'pending' && o.invoiceId);
         const uniqueInvoiceIds = [...new Set(pendingOrders.map(o => o.invoiceId))].filter(Boolean);
 
         for (const invoiceId of uniqueInvoiceIds) {
@@ -609,7 +608,7 @@ async function startServer() {
             if (isApproved) {
                 let emailsToSend: { email: string, name: string, order: any, product: any }[] = [];
 
-                await currentDb.update(dbData => {
+                await db.update(dbData => {
                     const ordersToComplete = dbData.orders.filter(o => o.invoiceId === invoiceId && o.status === 'pending');
                     for (const order of ordersToComplete) {
                         order.status = 'completed';
@@ -626,11 +625,11 @@ async function startServer() {
                                 emailsToSend.push({ email: user.email, name: user.name, order, product });
                             }
                         }
-                        io.emit("new_order", { orderId: order.id, productId: order.productId, name: product?.name });
+                        io.emit("new_order", { userId: order.userId, orderId: order.id, productId: order.productId, name: product?.name });
                         io.emit("inventory_update", { productId: order.productId, inventoryCount: product?.inventoryCount });
                     }
                 });
-                await currentDb.write();
+                await db.write();
 
                 // Send emails in background
                 for (const emailData of emailsToSend) {
@@ -638,13 +637,13 @@ async function startServer() {
                 }
 
             } else if (isFailed) {
-                await currentDb.update(dbData => {
+                await db.update(dbData => {
                     const ordersToFail = dbData.orders.filter(o => o.invoiceId === invoiceId && o.status === 'pending');
                     for (const order of ordersToFail) {
                         order.status = 'failed';
                     }
                 });
-                await currentDb.write();
+                await db.write();
             }
         }
     } catch (error) {

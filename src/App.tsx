@@ -111,6 +111,21 @@ function FloatingNav() {
   const { user, isAdmin } = useAuth();
   const location = useLocation();
   const { cart } = useCart();
+  const [hasNewInventory, setHasNewInventory] = useState(false);
+
+  useEffect(() => {
+      const handleNewItem = () => setHasNewInventory(true);
+      window.addEventListener('inventory_new_item', handleNewItem);
+      
+      // Clear badge if user visits inventory
+      if (location.pathname === '/profile' && (!location.hash || location.hash === '#inventory')) {
+          setHasNewInventory(false);
+      }
+
+      return () => {
+          window.removeEventListener('inventory_new_item', handleNewItem);
+      };
+  }, [location]);
 
   const isAdminRoute = location.pathname === '/admin';
 
@@ -213,6 +228,13 @@ function FloatingNav() {
                       {cart.length}
                     </motion.span>
                   )}
+                  {item.label === 'Inventory' && hasNewInventory && (
+                    <motion.span 
+                      initial={{ scale: 0 }}
+                      animate={{ scale: 1 }}
+                      className="absolute -top-1 -right-1 md:-top-1 md:-right-1 bg-green-500 w-3 h-3 flex items-center justify-center rounded-full shadow-sm border-2 border-white dark:border-black"
+                    />
+                  )}
                 </div>
                 {isActive && (
                   <motion.span 
@@ -310,19 +332,48 @@ export default function App() {
 }
 
 function OrderNotification() {
+    const { user } = useAuth();
     const [latestOrder, setLatestOrder] = useState<any>(null);
+    const [myConfirmedOrder, setMyConfirmedOrder] = useState<any>(null);
 
     useEffect(() => {
-        socket.on('new_order', (order) => {
-            setLatestOrder(order);
-            setTimeout(() => setLatestOrder(null), 5000);
-        });
-        return () => { socket.off('new_order'); };
-    }, []);
+        const handleNewOrder = (order: any) => {
+            if (user && order.userId === user.id) {
+                setMyConfirmedOrder(order);
+                setTimeout(() => setMyConfirmedOrder(null), 8000);
+                window.dispatchEvent(new CustomEvent('inventory_new_item'));
+            } else {
+                setLatestOrder(order);
+                setTimeout(() => setLatestOrder(null), 5000);
+            }
+        };
+
+        socket.on('new_order', handleNewOrder);
+        return () => { socket.off('new_order', handleNewOrder); };
+    }, [user]);
 
     return (
         <AnimatePresence>
-            {latestOrder && (
+            {myConfirmedOrder && (
+                <motion.div 
+                    initial={{ x: 300, opacity: 0, scale: 0.9 }}
+                    animate={{ x: 0, opacity: 1, scale: 1 }}
+                    exit={{ x: 300, opacity: 0, scale: 0.9 }}
+                    transition={{ type: "spring", stiffness: 400, damping: 25 }}
+                    className="fixed top-24 right-6 z-[60] bg-green-500/90 backdrop-blur-2xl border border-green-400 shadow-[0_20px_40px_-15px_rgba(34,197,94,0.3)] rounded-full p-2 pr-6 flex items-center gap-4"
+                >
+                    <div className="w-10 h-10 rounded-full bg-white text-green-500 flex items-center justify-center shadow-inner relative">
+                        <div className="absolute inset-0 rounded-full bg-white/20 animate-ping opacity-75" />
+                        <ShoppingBag className="w-4 h-4 relative z-10" />
+                    </div>
+                    <div>
+                        <p className="text-[10px] font-bold text-green-100 uppercase tracking-wider mb-0.5">Order Confirmed!</p>
+                        <p className="text-sm font-semibold text-white">{myConfirmedOrder?.name || "Product"} added to Inventory</p>
+                    </div>
+                </motion.div>
+            )}
+
+            {latestOrder && !myConfirmedOrder && (
                 <motion.div 
                     initial={{ x: 300, opacity: 0, scale: 0.9 }}
                     animate={{ x: 0, opacity: 1, scale: 1 }}
