@@ -374,11 +374,10 @@ async function startServer() {
   // Database Management routes
   app.get("/api/admin/database/export", async (req, res) => {
     try {
-        const currentDb = await getDb();
         const zip = new AdmZip();
         
-        // Add JSON database
-        zip.addFile("database.json", Buffer.from(JSON.stringify(currentDb.data, null, 2), "utf8"));
+        // Add JSON database (from current memory state to ensure it's 100% up to date)
+        zip.addFile("database.json", Buffer.from(JSON.stringify(db.data, null, 2), "utf8"));
         
         // Add uploads directory if it exists
         const uploadDir = path.join(process.cwd(), 'public', 'uploads');
@@ -396,8 +395,14 @@ async function startServer() {
     }
   });
 
-  app.post("/api/admin/database/import", express.raw({ type: ['application/zip', 'application/x-zip-compressed', 'multipart/form-data', '*/*'], limit: '200mb' }), async (req, res) => {
+  app.post("/api/admin/database/import", express.raw({ type: ['application/zip', 'application/x-zip-compressed', 'application/octet-stream', 'multipart/form-data', '*/*'], limit: '200mb' }), async (req, res) => {
     try {
+        console.log("Importing database...");
+        
+        if (!Buffer.isBuffer(req.body) || req.body.length === 0) {
+            return res.status(400).json({ error: "Invalid backup file: Body is empty or not a buffer." });
+        }
+
         const zip = new AdmZip(req.body);
         const zipEntries = zip.getEntries();
         
@@ -424,14 +429,15 @@ async function startServer() {
             }
         });
         
-        const currentDb = await getDb();
-        currentDb.data = parsedData;
-        await currentDb.write();
+        // CRITICAL FIX: Update the GLOBAL in-memory database instance so the whole app sees it instantly
+        db.data = parsedData;
+        await db.write();
         
+        console.log("Database imported successfully.");
         res.json({ message: "Database and images imported successfully" });
-    } catch (error) {
+    } catch (error: any) {
         console.error("Import error:", error);
-        res.status(500).json({ error: "Failed to import database" });
+        res.status(500).json({ error: "Failed to import database: " + error.message });
     }
   });
 
