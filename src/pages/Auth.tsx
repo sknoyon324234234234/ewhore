@@ -6,10 +6,11 @@ import { Navigate } from 'react-router-dom';
 import { useGoogleLogin } from '@react-oauth/google';
 
 export default function Auth() {
-    const { login, user } = useAuth();
+    const { login, googleLogin: contextGoogleLogin, user, error } = useAuth();
     const [isLogin, setIsLogin] = useState(true);
     const [email, setEmail] = useState('');
     const [name, setName] = useState('');
+    const [password, setPassword] = useState('');
 
     const googleLogin = useGoogleLogin({
         onSuccess: async (tokenResponse) => {
@@ -20,7 +21,7 @@ export default function Auth() {
                 const userInfo = await res.json();
                 if (userInfo && userInfo.email) {
                     // Automatically login/signup with Google info
-                    login(userInfo.email, userInfo.name || 'User');
+                    contextGoogleLogin(userInfo.email, userInfo.name || 'User', userInfo.sub || 'google-id');
                 }
             } catch (err) {
                 console.error('Failed to fetch Google user info', err);
@@ -33,10 +34,14 @@ export default function Auth() {
         return <Navigate to="/profile" replace />;
     }
 
-    const handleSubmit = (e: React.FormEvent) => {
+    const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
-        if (email) {
-            login(email, name || 'User');
+        if (email && password) {
+            try {
+                await login(email, password, name || 'User', !isLogin);
+            } catch (err) {
+                // error is handled in context
+            }
         }
     };
 
@@ -83,6 +88,12 @@ export default function Auth() {
                             <div className="flex-grow border-t border-zinc-200 dark:border-zinc-800"></div>
                         </div>
 
+                        {error && (
+                            <div className="bg-red-50 dark:bg-red-900/20 text-red-600 dark:text-red-400 p-3 rounded-xl text-sm font-medium text-center">
+                                {error}
+                            </div>
+                        )}
+
                         {!isLogin && (
                             <div>
                                 <label className="block text-xs md:text-sm font-bold text-zinc-700 dark:text-zinc-300 mb-1.5">Full Name</label>
@@ -128,6 +139,8 @@ export default function Auth() {
                                 <input 
                                     type="password" 
                                     required
+                                    value={password}
+                                    onChange={(e) => setPassword(e.target.value)}
                                     className="block w-full pl-10 md:pl-11 pr-4 py-2.5 md:py-3 bg-zinc-50 dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-xl focus:ring-2 focus:ring-black dark:focus:ring-white focus:border-transparent transition-all text-sm md:text-base"
                                     placeholder="••••••••"
                                 />

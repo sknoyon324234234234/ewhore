@@ -8,7 +8,7 @@ import { format } from 'date-fns';
 import { socket } from '../App';
 
 export default function Profile() {
-    const { user, logout } = useAuth();
+    const { user, logout, refreshUser } = useAuth();
     const location = useLocation();
     const navigate = useNavigate();
     const [orders, setOrders] = useState<Order[]>([]);
@@ -34,14 +34,25 @@ export default function Profile() {
     }, [user]);
 
     useEffect(() => {
-        socket.on('new_order', () => {
-            fetchOrders();
+        if (!user) return;
+
+        socket.on('new_order', (data: any) => {
+            if (!data || data.userId === user.id) {
+                fetchOrders();
+            }
+        });
+
+        socket.on('user_update', (data: any) => {
+            if (data && data.userId === user.id) {
+                refreshUser();
+            }
         });
 
         return () => {
             socket.off('new_order');
+            socket.off('user_update');
         };
-    }, [user]);
+    }, [user, refreshUser]);
 
     useEffect(() => {
         if (location.hash === '#history') {

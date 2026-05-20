@@ -16,6 +16,7 @@ export interface User {
     email: string;
     name: string;
     role: 'user' | 'admin';
+    password?: string;
     googleId?: string;
     loyaltyPoints: number;
     referralCode: string;

@@ -11,11 +11,23 @@ import helmet from "helmet";
 import compression from "compression";
 import rateLimit from "express-rate-limit";
 import hpp from "hpp";
+import bcrypt from "bcryptjs";
+import morgan from "morgan";
+import logger from "./src/logger.ts";
 import { getDb, User } from "./src/db.ts";
 
 import fs from "fs";
 import AdmZip from "adm-zip";
 import nodemailer from "nodemailer";
+
+// Override global console to use our advanced logger for everything
+const originalConsoleLog = console.log;
+const originalConsoleError = console.error;
+const originalConsoleWarn = console.warn;
+
+console.log = (...args) => logger.info(args.map(a => typeof a === 'object' ? JSON.stringify(a) : a).join(' '));
+console.error = (...args) => logger.error(args.map(a => typeof a === 'object' ? JSON.stringify(a) : a).join(' '));
+console.warn = (...args) => logger.warn(args.map(a => typeof a === 'object' ? JSON.stringify(a) : a).join(' '));
 
 const JWT_SECRET = process.env.JWT_SECRET || "super-secret-key-change-me";
 
@@ -128,6 +140,13 @@ async function startServer() {
       methods: ["GET", "POST"]
     }
   });
+
+  // Advanced request logging with Morgan & Winston
+  app.use(morgan('combined', {
+    stream: {
+      write: (message) => logger.info(message.trim())
+    }
+  }));
 
   app.use(helmet({
     contentSecurityPolicy: false, // Disabled for local dev / Vite compatibility
@@ -243,18 +262,90 @@ async function startServer() {
       res.json(usersWithStats);
   });
 
+  app.get("/api/auth/me", async (req, res) => {
+    try {
+      const token = req.cookies?.token || req.headers.authorization?.split(' ')[1];
+      if (!token) return res.status(401).json({ error: "Unauthorized" });
+      const decoded = jwt.verify(token, JWT_SECRET) as any;
+      const user = db.data.users.find(u => u.id === decoded.id);
+      if (!user) return res.status(404).json({ error: "User not found" });
+      const { password, ...safeUser } = user;
+      res.json({ user: safeUser });
+    } catch (err) {
+      res.status(401).json({ error: "Invalid token" });
+    }
+  });
+
+  app.post("/api/auth/register", async (req, res) => {
+    const { email, password, name, referralCode } = req.body;
+    if (!email || !password) return res.status(400).json({ error: "Email and password required" });
+    
+    const normalizedEmail = email.toLowerCase().trim();
+    let user = db.data.users.find(u => u.email.toLowerCase() === normalizedEmail);
+    if (user) return res.status(400).json({ error: "Email already exists" });
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    const newUser: User = {
+      id: Math.random().toString(36).substring(7),
+      email: normalizedEmail,
+      name: name || 'User',
+      password: hashedPassword,
+      role: normalizedEmail === "sknoyon.a2core@gmail.com" ? "admin" : (normalizedEmail.includes("admin") ? "admin" : "user"),
+      loyaltyPoints: 10,
+      referralCode: Math.random().toString(36).substring(7).toUpperCase(),
+      referredBy: referralCode
+    };
+    
+    if (referralCode) {
+        const referrer = db.data.users.find(u => u.referralCode === referralCode);
+        if (referrer) referrer.loyaltyPoints += 50;
+    }
+
+    await db.update(({ users }) => users.push(newUser));
+    await db.write();
+
+    const { password: _, ...safeUser } = newUser;
+    const token = jwt.sign({ id: newUser.id, role: newUser.role }, JWT_SECRET);
+    res.cookie("token", token, { httpOnly: true }).json({ user: safeUser, token });
+  });
+
+  app.post("/api/auth/login", async (req, res) => {
+    const { email, password } = req.body;
+    if (!email || !password) return res.status(400).json({ error: "Email and password required" });
+    
+    const normalizedEmail = email.toLowerCase().trim();
+    const user = db.data.users.find(u => u.email.toLowerCase() === normalizedEmail);
+    
+    if (!user) {
+        return res.status(400).json({ error: "Invalid credentials" });
+    }
+    
+    if (!user.password) {
+        return res.status(400).json({ error: "Please login with Google" });
+    }
+
+    const isValid = await bcrypt.compare(password, user.password);
+    if (!isValid) return res.status(400).json({ error: "Invalid credentials" });
+
+    const { password: _, ...safeUser } = user;
+    const token = jwt.sign({ id: user.id, role: user.role }, JWT_SECRET);
+    res.cookie("token", token, { httpOnly: true }).json({ user: safeUser, token });
+  });
+
   app.post("/api/auth/google", async (req, res) => {
     const { email, name, googleId, referralCode } = req.body;
     console.log("Google Login Attempt for:", email);
     
-    let user = db.data.users.find(u => u.email === email);
+    const normalizedEmail = email.toLowerCase().trim();
+    let user = db.data.users.find(u => u.email.toLowerCase() === normalizedEmail);
 
     if (!user) {
       const newUser: User = {
         id: Math.random().toString(36).substring(7),
-        email,
-        name,
-        role: email === "sknoyon.a2core@gmail.com" ? "admin" : (email.includes("admin") ? "admin" : "user"),
+        email: normalizedEmail,
+        name: name || 'User',
+        role: normalizedEmail === "sknoyon.a2core@gmail.com" ? "admin" : (normalizedEmail.includes("admin") ? "admin" : "user"),
         googleId,
         loyaltyPoints: 10, // Signup bonus
         referralCode: Math.random().toString(36).substring(7).toUpperCase(),
@@ -272,10 +363,21 @@ async function startServer() {
       user = newUser;
       await db.update(({ users }) => users.push(newUser));
       await db.write();
+    } else {
+        // Update googleId if they previously signed up with password and now use Google
+        if (!user.googleId && googleId) {
+            await db.update(data => {
+                const u = data.users.find(u => u.email.toLowerCase() === normalizedEmail);
+                if (u) u.googleId = googleId;
+            });
+            await db.write();
+            user.googleId = googleId;
+        }
     }
 
+    const { password: _, ...safeUser } = user;
     const token = jwt.sign({ id: user.id, role: user.role }, JWT_SECRET);
-    res.cookie("token", token, { httpOnly: true }).json({ user, token });
+    res.cookie("token", token, { httpOnly: true }).json({ user: safeUser, token });
   });
 
   app.post("/api/checkout", async (req, res) => {
@@ -627,6 +729,9 @@ async function startServer() {
                         }
                         io.emit("new_order", { userId: order.userId, orderId: order.id, productId: order.productId, name: product?.name });
                         io.emit("inventory_update", { productId: order.productId, inventoryCount: product?.inventoryCount });
+                        if (user) {
+                            io.emit("user_update", { userId: user.id });
+                        }
                     }
                 });
                 await db.write();
