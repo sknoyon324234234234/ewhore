@@ -48,6 +48,12 @@ const saveBase64Images = (images: string[]) => {
 
 async function startServer() {
   const app = express();
+  
+  // VERY IMPORTANT FOR HOSTINGER/PROXIES
+  // This tells Express to trust the X-Forwarded-For header from Hostinger's proxy
+  // Without this, express-rate-limit will crash or block all users
+  app.set("trust proxy", 1);
+
   const PORT = process.env.PORT || 3000;
   const server = http.createServer(app);
   const io = new Server(server, {
